@@ -1,9 +1,13 @@
 # driftdb
 
-A small, dependency-free local-first document store written in Go. Replicas
-accept writes while offline and converge deterministically when they next
-exchange operations, with no central server and no vector-clock bookkeeping in
-your application code.
+[![ci](https://github.com/rushikeshg25/driftdb/actions/workflows/ci.yml/badge.svg)](https://github.com/rushikeshg25/driftdb/actions/workflows/ci.yml)
+[![Go 1.24+](https://img.shields.io/badge/go-1.24%2B-00ADD8?logo=go)](go.mod)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+**A local-first, offline-capable document store written in Go.** Each replica
+keeps a durable operation log, accepts writes with no network, and converges
+deterministically when replicas next exchange operations. No central server, no
+third-party dependencies, and no conflict-resolution code in your application.
 
 ```
 $ driftdb --data ./alice --node alice put note title "buy milk"
@@ -16,13 +20,17 @@ $ driftdb --data ./alice --node alice sync 127.0.0.1:7070
 pulled 0, pushed 1
 ```
 
-## Why
+## Overview
 
 Most applications still treat "offline" as an error path. driftdb makes it the
 normal path: every replica owns a durable operation log, edits are timestamped
 locally, and replication is a stateless anti-entropy exchange over TCP. Two
-replicas that have seen the same operations have byte-identical state,
+replicas that have seen the same operations materialize the same state,
 regardless of the order those operations arrived in.
+
+driftdb is intended as a compact, readable reference for CRDT-based sync and as
+an embedded store for prototypes, demos, and tests. It is not a production
+database; see [Limits](#limits).
 
 The data model is deliberately small:
 
@@ -87,9 +95,12 @@ different identity.
 
 ## Install and run
 
-Requires Go 1.24+. There are no third-party dependencies.
+Requires Go 1.24+ and no third-party dependencies (Linux, macOS, or Windows).
 
 ```sh
+go install github.com/rushikeshg25/driftdb/cmd/driftdb@latest
+
+# or from a checkout:
 go build -o bin/driftdb ./cmd/driftdb
 ./examples/demo.sh        # two offline replicas, conflict resolution, then sync
 ```
@@ -122,6 +133,17 @@ Flags may appear before or after the command:
 --node ID      replica id (default $DRIFTDB_NODE or "local")
 --listen ADDR  replication listen address (default 127.0.0.1:7070)
 ```
+
+Replica ids must be 1-128 characters and cannot contain `/` or whitespace; the
+id is part of every operation id (`node/seq`). The id is recorded in the data
+directory on first open and cannot change later.
+
+`get` prints live register values and set members. A deleted register is shown
+as `"deleted": true` without a value until a newer write resurrects it. A field
+is either a register or a set: a local `put`/`del` on a set, or `sadd`/`srem` on
+a register, fails with a type-conflict error instead of silently hiding data.
+Operations received from peers still merge deterministically by HLC even if they
+mix types.
 
 ## A conflict, step by step
 
@@ -161,6 +183,13 @@ This is a compact reference implementation, not a production database:
 - Clock skew can change *which* concurrent write wins, but it cannot cause
   divergence.
 - A single data directory must not be opened by two processes at once.
+
+## Status
+
+v0.1 is complete and usable: CRDT state, durable storage, TCP anti-entropy, CLI,
+tests, and CI are all in place. CI runs `gofmt`, `go vet`, and `go test -race`.
+The roadmap in [plan.md](plan.md) covers authentication, compaction/snapshots,
+and transport hardening.
 
 ## Layout
 
