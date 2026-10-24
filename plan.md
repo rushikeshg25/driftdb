@@ -25,8 +25,12 @@ engine.
 - [x] Append-only `ops.jsonl` with per-write `fsync` and replay on open.
 - [x] Torn trailing write detection and truncation on recovery.
 - [x] Contiguous per-node vector clocks, so sparse imports cannot hide gaps.
-- [x] Replica identity pinned to the data directory.
+- [x] Replica identity pinned to the data directory, with ids validated for
+      use in operation ids.
+- [x] Local type-conflict guard: a register cannot silently become a set (or
+      the reverse) through a local write.
 - [x] One-connection pull+push anti-entropy protocol over NDJSON/TCP.
+- [x] Cancellation-safe client sync and graceful shutdown of active peers.
 - [x] CLI for writes, reads, logs, export/import, sync, and serve.
 - [x] Two- and three-replica convergence tests, batching tests, and benchmarks.
 - [x] Offline-first demo script and CI (gofmt, vet, race tests, build).
