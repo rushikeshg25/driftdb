@@ -18,7 +18,7 @@ fmt:
 	gofmt -w $$(find . -name '*.go' -not -path './bin/*')
 
 clean:
-	rm -rf bin driftdb-data
+	rm -rf bin
 
 demo: build
 	./examples/demo.sh

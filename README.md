@@ -219,6 +219,7 @@ make test    # go test ./...
 make race    # go test -race ./...
 make vet
 make demo
+make clean   # remove build output; keep all replica data
 ```
 
 See [plan.md](plan.md) for milestones, design decisions, and the roadmap.
