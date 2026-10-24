@@ -355,9 +355,6 @@ func runServe(opts options, stdout, stderr io.Writer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		ln.Close()
-	}()
+	// Serve closes the listener and active connections when ctx is canceled.
 	return syncer.Serve(ctx, ln, st)
 }
