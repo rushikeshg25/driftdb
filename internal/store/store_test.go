@@ -101,6 +101,57 @@ func TestEmptyKeysRejected(t *testing.T) {
 	}
 }
 
+func TestClockOnlyAdvancesOverContiguousOps(t *testing.T) {
+	a := openStore(t, t.TempDir(), "a")
+	mustSet(t, a, "d", "f", "one")
+	mustSet(t, a, "d", "f", "two")
+	mustSet(t, a, "d", "f", "three")
+
+	b := openStore(t, t.TempDir(), "b")
+	all := a.Ops()
+	// Simulate a partial import: b receives only a's third operation.
+	if _, err := b.Apply([]crdt.Op{all[2]}); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Clock()["a"]; got != 0 {
+		t.Fatalf("clock[a] = %d, want 0 while ops 1-2 are missing", got)
+	}
+
+	// A full sync must therefore resend the whole prefix.
+	n, err := b.Apply(a.Missing(b.Clock()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("applied = %d, want the 2 missing ops", n)
+	}
+	if got := b.Clock()["a"]; got != 3 {
+		t.Fatalf("clock[a] = %d, want 3 after filling the gap", got)
+	}
+}
+
+func TestLocalSeqSkipsImportedCollisions(t *testing.T) {
+	a := openStore(t, t.TempDir(), "a")
+	mustSet(t, a, "d", "f", "remote-1")
+	remoteOp := a.Ops()[0]
+
+	b := openStore(t, t.TempDir(), "b")
+	// Give b an op that claims b/1 even though b has not minted anything.
+	foreign := remoteOp
+	foreign.Node = "b"
+	foreign.HLC.Node = "b"
+	if _, err := b.Apply([]crdt.Op{foreign}); err != nil {
+		t.Fatal(err)
+	}
+	op, err := b.Set("d", "f", "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.ID() == "b/1" {
+		t.Fatal("local sequence collided with an imported op")
+	}
+}
+
 func TestOpsSurviveReopen(t *testing.T) {
 	dir := t.TempDir()
 	s := openStore(t, dir, "a")

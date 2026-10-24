@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -160,9 +161,7 @@ func (s *Store) ingest(raw []byte) error {
 		return err
 	}
 	s.ops[op.ID()] = op
-	if op.Seq > s.seqs[op.Node] {
-		s.seqs[op.Node] = op.Seq
-	}
+	s.advanceContiguous(op.Node)
 	if op.Node != s.node {
 		s.clock.Observe(op.HLC)
 	}
@@ -199,9 +198,7 @@ func (s *Store) applyLocked(op crdt.Op) (bool, error) {
 		return false, fmt.Errorf("sync op: %w", err)
 	}
 	s.ops[op.ID()] = op
-	if op.Seq > s.seqs[op.Node] {
-		s.seqs[op.Node] = op.Seq
-	}
+	s.advanceContiguous(op.Node)
 	if op.Node != s.node {
 		s.clock.Observe(op.HLC)
 	}
@@ -216,9 +213,13 @@ func (s *Store) localLocked(kind crdt.OpKind, doc, field, value, element string,
 	if doc == "" || field == "" {
 		return crdt.Op{}, ErrEmptyKey
 	}
+	seq := s.seqs[s.node] + 1
+	for s.hasOp(s.node, seq) {
+		seq++
+	}
 	op := crdt.Op{
 		Node:    s.node,
-		Seq:     s.seqs[s.node] + 1,
+		Seq:     seq,
 		HLC:     s.clock.Now(),
 		Kind:    kind,
 		Doc:     doc,
@@ -231,6 +232,22 @@ func (s *Store) localLocked(kind crdt.OpKind, doc, field, value, element string,
 		return crdt.Op{}, err
 	}
 	return op, nil
+}
+
+// hasOp reports whether an operation id is already present.
+func (s *Store) hasOp(node string, seq uint64) bool {
+	_, ok := s.ops[node+"/"+strconv.FormatUint(seq, 10)]
+	return ok
+}
+
+// advanceContiguous moves a node's vector-clock entry forward only across an
+// unbroken run of operations. Without this, importing a sparse log (for
+// example operation 9 without 1-8) would make the replica claim it has
+// everything up to 9 and silently skip the missing operations during sync.
+func (s *Store) advanceContiguous(node string) {
+	for s.hasOp(node, s.seqs[node]+1) {
+		s.seqs[node]++
+	}
 }
 
 // Set writes a value into a register field.
