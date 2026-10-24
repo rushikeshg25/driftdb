@@ -96,6 +96,21 @@ func (s *State) Apply(op Op) error {
 	return nil
 }
 
+// ObservedTags returns the live OR-Set tags this replica has seen for an
+// element. A removal op carries these tags so that only the observed adds are
+// cancelled.
+func (s *State) ObservedTags(doc, field, element string) []string {
+	d := s.Docs[doc]
+	if d == nil {
+		return nil
+	}
+	f := d.Fields[field]
+	if f == nil || f.Set == nil {
+		return nil
+	}
+	return f.Set.tags(element)
+}
+
 // Doc returns the materialized fields of one document. The second return value
 // reports whether the document exists.
 func (s *State) Doc(id string) (map[string]FieldView, bool) {
