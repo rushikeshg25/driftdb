@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -300,6 +301,72 @@ func TestServeRejectsBadHello(t *testing.T) {
 	}
 	if msg.Type != "err" {
 		t.Fatalf("type = %q, want err", msg.Type)
+	}
+}
+
+func TestServeClosesActiveConnectionsOnCancel(t *testing.T) {
+	b := openStore(t, "b")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Serve(ctx, ln, b) }()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Leave the connection idle: the server handler is blocked waiting for a
+	// hello. Cancellation must still shut it down.
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve returned %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not close an active idle connection")
+	}
+}
+
+func TestExchangeHonorsCancellation(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		io.Copy(io.Discard, conn)
+	}()
+
+	a := openStore(t, "a")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Exchange(ctx, ln.Addr().String(), a)
+		done <- err
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected cancellation error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("exchange ignored context cancellation")
 	}
 }
 

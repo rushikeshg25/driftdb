@@ -84,21 +84,26 @@ func Exchange(ctx context.Context, addr string, st *store.Store) (pulled, pushed
 	}
 	defer conn.Close()
 
-	deadline := time.Now().Add(exchangeTimeout)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-	if err := conn.SetDeadline(deadline); err != nil {
-		return 0, 0, err
-	}
+	// Closing the connection is the only portable way to interrupt a blocked
+	// read when the caller cancels.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 
 	dec := json.NewDecoder(bufio.NewReaderSize(conn, 1<<20))
 	enc := json.NewEncoder(conn)
+	sendMsg := func(m Message) error {
+		touch(conn)
+		return send(enc, m)
+	}
+	recvMsg := func() (Message, error) {
+		touch(conn)
+		return recv(dec)
+	}
 
-	if err := send(enc, Message{Type: "hello", Node: st.Node(), Clock: st.Clock()}); err != nil {
+	if err := sendMsg(Message{Type: "hello", Node: st.Node(), Clock: st.Clock()}); err != nil {
 		return 0, 0, err
 	}
-	hello, err := recv(dec)
+	hello, err := recvMsg()
 	if err != nil {
 		return 0, 0, err
 	}
@@ -106,8 +111,9 @@ func Exchange(ctx context.Context, addr string, st *store.Store) (pulled, pushed
 		return 0, 0, fmt.Errorf("%w: expected hello, got %q", ErrProtocol, hello.Type)
 	}
 
+	touch(conn)
 	for pulling := true; pulling; {
-		m, err := recv(dec)
+		m, err := recvMsg()
 		if err != nil {
 			return pulled, pushed, err
 		}
@@ -126,15 +132,15 @@ func Exchange(ctx context.Context, addr string, st *store.Store) (pulled, pushed
 	}
 
 	for _, batch := range batches(st.Missing(hello.Clock)) {
-		if err := send(enc, Message{Type: "push", Ops: batch}); err != nil {
+		if err := sendMsg(Message{Type: "push", Ops: batch}); err != nil {
 			return pulled, pushed, err
 		}
 	}
-	if err := send(enc, Message{Type: "pushdone"}); err != nil {
+	if err := sendMsg(Message{Type: "pushdone"}); err != nil {
 		return pulled, pushed, err
 	}
 
-	ack, err := recv(dec)
+	ack, err := recvMsg()
 	if err != nil {
 		return pulled, pushed, err
 	}
@@ -147,16 +153,19 @@ func Exchange(ctx context.Context, addr string, st *store.Store) (pulled, pushed
 // Serve accepts replication connections until ctx is cancelled.
 func Serve(ctx context.Context, ln net.Listener, st *store.Store) error {
 	var wg sync.WaitGroup
-	go func() {
-		<-ctx.Done()
-		ln.Close()
-	}()
+	stop := context.AfterFunc(ctx, func() { ln.Close() })
+	defer stop()
 
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
+			if ctx.Err() != nil {
 				wg.Wait()
+				return nil
+			}
+			if errors.Is(err, net.ErrClosed) {
+				// The listener was closed by someone else. Do not wait for
+				// connections: nothing has told them to stop.
 				return nil
 			}
 			return fmt.Errorf("syncer: accept: %w", err)
@@ -164,7 +173,7 @@ func Serve(ctx context.Context, ln net.Listener, st *store.Store) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			handleConn(conn, st)
+			handleConn(ctx, conn, st)
 		}()
 	}
 }
@@ -178,15 +187,30 @@ func ListenAndServe(ctx context.Context, addr string, st *store.Store) error {
 	return Serve(ctx, ln, st)
 }
 
-func handleConn(conn net.Conn, st *store.Store) {
+// touch turns the absolute exchange timeout into an idle timeout so a large but
+// healthy sync is not cut off mid-stream.
+func touch(conn net.Conn) {
+	_ = conn.SetDeadline(time.Now().Add(exchangeTimeout))
+}
+
+func handleConn(ctx context.Context, conn net.Conn, st *store.Store) {
 	defer conn.Close()
-	if err := conn.SetDeadline(time.Now().Add(exchangeTimeout)); err != nil {
-		return
-	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	touch(conn)
+
 	dec := json.NewDecoder(bufio.NewReaderSize(conn, 1<<20))
 	enc := json.NewEncoder(conn)
+	sendMsg := func(m Message) error {
+		touch(conn)
+		return send(enc, m)
+	}
+	recvMsg := func() (Message, error) {
+		touch(conn)
+		return recv(dec)
+	}
 
-	hello, err := recv(dec)
+	hello, err := recvMsg()
 	if err != nil {
 		send(enc, Message{Type: "err", Error: err.Error()})
 		return
@@ -200,21 +224,21 @@ func handleConn(conn net.Conn, st *store.Store) {
 		return
 	}
 
-	if err := send(enc, Message{Type: "hello", Node: st.Node(), Clock: st.Clock()}); err != nil {
+	if err := sendMsg(Message{Type: "hello", Node: st.Node(), Clock: st.Clock()}); err != nil {
 		return
 	}
 	for _, batch := range batches(st.Missing(hello.Clock)) {
-		if err := send(enc, Message{Type: "ops", Ops: batch}); err != nil {
+		if err := sendMsg(Message{Type: "ops", Ops: batch}); err != nil {
 			return
 		}
 	}
-	if err := send(enc, Message{Type: "done"}); err != nil {
+	if err := sendMsg(Message{Type: "done"}); err != nil {
 		return
 	}
 
 	applied := 0
 	for {
-		m, err := recv(dec)
+		m, err := recvMsg()
 		if err != nil {
 			return
 		}
@@ -227,7 +251,7 @@ func handleConn(conn net.Conn, st *store.Store) {
 			}
 			applied += n
 		case "pushdone":
-			send(enc, Message{Type: "ack", Count: applied})
+			sendMsg(Message{Type: "ack", Count: applied})
 			return
 		default:
 			send(enc, Message{Type: "err", Error: fmt.Sprintf("unexpected message %q", m.Type)})
