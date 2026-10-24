@@ -1,0 +1,13 @@
+# Binaries
+/bin/
+/driftdb
+/driftdb-data/
+
+# Test and coverage output
+*.out
+coverage.html
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/
