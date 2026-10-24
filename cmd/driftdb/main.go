@@ -46,6 +46,7 @@ flags (may appear before or after the command):
   --data DIR     data directory (default ./driftdb-data)
   --node ID      replica id (default $DRIFTDB_NODE or "local")
   --listen ADDR  replication listen address (default 127.0.0.1:7070)
+  --             treat remaining arguments as literal values
 `
 
 type options struct {
@@ -69,7 +70,7 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) error {
 	opts, rest, err := parseArgs(args)
 	if err != nil {
-		fmt.Fprint(stderr, usage)
+		fmt.Fprintf(stderr, "driftdb: %v\n\n%s", err, usage)
 		return errUsage
 	}
 	if len(rest) == 0 || rest[0] == "help" {
@@ -78,6 +79,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	cmd, args := rest[0], rest[1:]
+	if err := validateCommandArgs(cmd, args); err != nil {
+		fmt.Fprintf(stderr, "driftdb: %v\n\n%s", err, usage)
+		return errUsage
+	}
 	switch cmd {
 	case "get", "put", "del", "sadd", "srem", "ls", "log", "status", "export", "import":
 		st, err := store.Open(opts.data, opts.node)
@@ -100,6 +105,34 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprint(stderr, usage)
 		return errUsage
 	}
+}
+
+// Validate before opening the store so malformed commands have no disk or
+// network side effects.
+func validateCommandArgs(cmd string, args []string) error {
+	minArgs, maxArgs := 0, 0
+	switch cmd {
+	case "get", "import", "sync":
+		minArgs, maxArgs = 1, 1
+	case "put", "sadd", "srem":
+		minArgs, maxArgs = 3, 3
+	case "del":
+		minArgs, maxArgs = 2, 2
+	case "log", "export":
+		maxArgs = 1
+	case "ls", "status", "serve":
+	default:
+		return fmt.Errorf("unknown command %q", cmd)
+	}
+	if len(args) < minArgs || len(args) > maxArgs {
+		return fmt.Errorf("%s expects %d-%d arguments, got %d", cmd, minArgs, maxArgs, len(args))
+	}
+	if cmd == "log" && len(args) == 1 {
+		if n, err := strconv.Atoi(args[0]); err != nil || n < 0 {
+			return fmt.Errorf("invalid log limit %q", args[0])
+		}
+	}
+	return nil
 }
 
 func parseArgs(args []string) (options, []string, error) {
@@ -126,10 +159,14 @@ func parseArgs(args []string) (options, []string, error) {
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "-h" || arg == "--help" || arg == "help" {
+		if arg == "--" {
+			rest = append(rest, args[i+1:]...)
+			break
+		}
+		if arg == "-h" || arg == "--help" {
 			return opts, nil, nil
 		}
-		if !strings.HasPrefix(arg, "-") {
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
 			rest = append(rest, arg)
 			continue
 		}

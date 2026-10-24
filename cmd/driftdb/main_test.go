@@ -151,3 +151,42 @@ func TestCLIHelp(t *testing.T) {
 		t.Fatalf("unexpected help:\n%s", out)
 	}
 }
+
+func TestCLILiteralValues(t *testing.T) {
+	for _, value := range []string{"help", "--help", "-1", "-", "--"} {
+		t.Run(value, func(t *testing.T) {
+			dir := t.TempDir()
+			args := []string{"--data", dir, "--node", "a", "put", "d", "f"}
+			if strings.HasPrefix(value, "-") {
+				args = append(args, "--")
+			}
+			args = append(args, value)
+			out, _, err := runCLI(t, args...)
+			if err != nil || !strings.HasPrefix(out, "ok a/") {
+				t.Fatalf("put out=%q err=%v", out, err)
+			}
+			out, _, err = runCLI(t, "--data", dir, "--node", "a", "get", "d")
+			if err != nil || !strings.Contains(out, `"value": "`+value+`"`) {
+				t.Fatalf("get out=%q err=%v", out, err)
+			}
+		})
+	}
+}
+
+func TestCLIUsageDoesNotCreateStore(t *testing.T) {
+	for _, args := range [][]string{
+		{"put", "d", "f"}, {"get"}, {"ls", "extra"}, {"status", "extra"},
+		{"serve", "extra"}, {"sync"}, {"export", "a", "b"}, {"import"},
+		{"log", "1", "2"}, {"log", "invalid"}, {"--unknown"},
+	} {
+		dir := filepath.Join(t.TempDir(), "not-created")
+		all := append([]string{"--data", dir, "--node", "a"}, args...)
+		_, stderr, err := runCLI(t, all...)
+		if !errors.Is(err, errUsage) || !strings.Contains(stderr, "driftdb:") {
+			t.Errorf("args=%v stderr=%q err=%v", args, stderr, err)
+		}
+		if _, err := os.Stat(dir); !os.IsNotExist(err) {
+			t.Errorf("invalid command %v created a store", args)
+		}
+	}
+}

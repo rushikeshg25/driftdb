@@ -134,6 +134,12 @@ Flags may appear before or after the command:
 --listen ADDR  replication listen address (default 127.0.0.1:7070)
 ```
 
+`help` remains a valid document, field, or value. Use `--` before literal
+arguments that begin with a dash, for example:
+`driftdb --data ./alice --node alice put note title -- --help`.
+Invalid commands and argument counts exit with code 2 before opening a store
+or starting a listener.
+
 Replica ids must be 1-128 characters and cannot contain `/` or whitespace; the
 id is part of every operation id (`node/seq`). The id is recorded in the data
 directory on first open and cannot change later.
