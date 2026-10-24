@@ -235,6 +235,35 @@ func TestPushedOpsAreDurable(t *testing.T) {
 	}
 }
 
+func TestExchangePaginatesLargeLogs(t *testing.T) {
+	a := openStore(t, "a")
+	b := openStore(t, "b")
+	addrA := serve(t, a)
+
+	// More operations than one wire message, in the server->client direction.
+	for i := 0; i < batchSize+17; i++ {
+		if _, err := a.Set("bulk", "field", fmt.Sprintf("a-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pulled, pushed := syncPair(t, b, a, addrA)
+	if pulled != batchSize+17 || pushed != 0 {
+		t.Fatalf("pulled/pushed = %d/%d, want %d/0", pulled, pushed, batchSize+17)
+	}
+
+	// And in the client->server (push) direction.
+	for i := 0; i < batchSize+17; i++ {
+		if _, err := b.Set("bulk", "field", fmt.Sprintf("b-%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pulled, pushed = syncPair(t, b, a, addrA)
+	if pulled != 0 || pushed != batchSize+17 {
+		t.Fatalf("pulled/pushed = %d/%d, want 0/%d", pulled, pushed, batchSize+17)
+	}
+	requireConverged(t, a, b)
+}
+
 func TestExchangeRejectsUnreachablePeer(t *testing.T) {
 	a := openStore(t, "a")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
