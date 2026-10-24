@@ -187,9 +187,10 @@ func (s *Store) ingest(raw []byte) error {
 	}
 	s.ops[op.ID()] = op
 	s.advanceContiguous(op.Node)
-	if op.Node != s.node {
-		s.clock.Observe(op.HLC)
-	}
+	// Replayed or imported operations may belong to this replica too. Their
+	// timestamps must precede every subsequent local write, even after rollback
+	// of the wall clock or restoration of an old data directory.
+	s.clock.Observe(op.HLC)
 	return nil
 }
 
@@ -228,9 +229,10 @@ func (s *Store) applyLocked(op crdt.Op) (bool, error) {
 	}
 	s.ops[op.ID()] = op
 	s.advanceContiguous(op.Node)
-	if op.Node != s.node {
-		s.clock.Observe(op.HLC)
-	}
+	// Replayed or imported operations may belong to this replica too. Their
+	// timestamps must precede every subsequent local write, even after rollback
+	// of the wall clock or restoration of an old data directory.
+	s.clock.Observe(op.HLC)
 	return true, nil
 }
 

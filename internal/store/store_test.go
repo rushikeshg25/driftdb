@@ -9,8 +9,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rushikeshg25/driftdb/internal/crdt"
+	"github.com/rushikeshg25/driftdb/internal/hlc"
 )
 
 func openStore(t *testing.T, dir, node string) *Store {
@@ -418,5 +420,50 @@ func TestCloseIsIdempotent(t *testing.T) {
 	}
 	if _, err := s.Set("d", "f", "v"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("err = %v, want ErrClosed", err)
+	}
+}
+
+func TestLocalClockSurvivesReopen(t *testing.T) {
+	dir := t.TempDir()
+	st := openStore(t, dir, "a")
+	future := time.Now().Add(24 * time.Hour)
+	st.clock = hlc.NewWithTime("a", func() time.Time { return future })
+	previous, err := st.Set("d", "f", "before")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st = openStore(t, dir, "a")
+	next, err := st.Set("d", "f", "after")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, _ := st.Doc("d")
+	if !next.HLC.After(previous.HLC) || fields["f"].Value != "after" {
+		t.Fatalf("acknowledged write lost: previous=%v next=%v value=%q", previous.HLC, next.HLC, fields["f"].Value)
+	}
+}
+
+func TestImportedOwnOperationsAdvanceClock(t *testing.T) {
+	source := openStore(t, t.TempDir(), "a")
+	future := time.Now().Add(24 * time.Hour)
+	source.clock = hlc.NewWithTime("a", func() time.Time { return future })
+	op, err := source.Set("d", "f", "imported")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := openStore(t, t.TempDir(), "a")
+	if _, err := restored.Apply([]crdt.Op{op}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := restored.Set("d", "f", "new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields, _ := restored.Doc("d")
+	if !next.HLC.After(op.HLC) || fields["f"].Value != "new" {
+		t.Fatalf("own imported timestamp was not observed: %v -> %v", op.HLC, next.HLC)
 	}
 }
