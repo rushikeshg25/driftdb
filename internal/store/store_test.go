@@ -467,3 +467,83 @@ func TestImportedOwnOperationsAdvanceClock(t *testing.T) {
 		t.Fatalf("own imported timestamp was not observed: %v -> %v", op.HLC, next.HLC)
 	}
 }
+
+func TestOperationSnapshotsOwnTags(t *testing.T) {
+	for _, mode := range []string{"apply input", "local return", "ops return", "missing return"} {
+		t.Run(mode, func(t *testing.T) {
+			st := openStore(t, t.TempDir(), "a")
+			add, err := st.SetAdd("d", "tags", "x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			remove, err := st.SetRemove("d", "tags", "x")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var exposed crdt.Op
+			switch mode {
+			case "apply input":
+				copy := openStore(t, t.TempDir(), "b")
+				if _, err := copy.Apply([]crdt.Op{add, remove}); err != nil {
+					t.Fatal(err)
+				}
+				st = copy
+				exposed = remove
+			case "local return":
+				exposed = remove
+			case "ops return":
+				exposed = st.Ops()[1]
+			case "missing return":
+				exposed = st.Missing(nil)[1]
+			}
+			exposed.Tags[0] = "corrupted/99"
+			if got := st.Ops()[1].Tags[0]; got != add.ID() {
+				t.Fatalf("caller changed stored operation: %q", got)
+			}
+			peer := openStore(t, t.TempDir(), "peer")
+			if _, err := peer.Apply(st.Ops()); err != nil {
+				t.Fatal(err)
+			}
+			want, err := st.CanonicalJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := peer.CanonicalJSON()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("snapshot diverged: got %s want %s", got, want)
+			}
+		})
+	}
+}
+
+func TestEmptyRemovalDeduplicatesAfterJSONRoundTrip(t *testing.T) {
+	st := openStore(t, t.TempDir(), "a")
+	if _, err := st.SetAdd("d", "tags", "present"); err != nil {
+		t.Fatal(err)
+	}
+	op, err := st.SetRemove("d", "tags", "absent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded crdt.Op
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.Apply([]crdt.Op{decoded}); err != nil || n != 0 {
+		t.Fatalf("identical wire operation rejected: n=%d err=%v", n, err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st = openStore(t, st.Dir(), "a")
+	if n, err := st.Apply([]crdt.Op{op}); err != nil || n != 0 {
+		t.Fatalf("dedup after reopen: n=%d err=%v", n, err)
+	}
+}

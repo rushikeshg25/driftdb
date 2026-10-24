@@ -173,6 +173,7 @@ func (s *Store) ingest(raw []byte) error {
 	if err := json.Unmarshal(raw, &op); err != nil {
 		return fmt.Errorf("decode op: %w", err)
 	}
+	op = copyOp(op)
 	if err := op.Validate(); err != nil {
 		return err
 	}
@@ -197,6 +198,7 @@ func (s *Store) ingest(raw []byte) error {
 // applyLocked persists and applies an operation. It reports whether the op was
 // new. The caller must hold the write lock.
 func (s *Store) applyLocked(op crdt.Op) (bool, error) {
+	op = copyOp(op)
 	if s.f == nil {
 		return false, ErrClosed
 	}
@@ -365,13 +367,20 @@ func (s *Store) DocIDs() []string {
 	return s.state.DocIDs()
 }
 
+// copyOp gives the store and each caller independent ownership of tags. Empty
+// tags are normalized to nil because JSON omitempty encodes both identically.
+func copyOp(op crdt.Op) crdt.Op {
+	op.Tags = append([]string(nil), op.Tags...)
+	return op
+}
+
 // Ops returns every stored operation sorted by node and sequence.
 func (s *Store) Ops() []crdt.Op {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]crdt.Op, 0, len(s.ops))
 	for _, op := range s.ops {
-		out = append(out, op)
+		out = append(out, copyOp(op))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Node != out[j].Node {
@@ -400,7 +409,7 @@ func (s *Store) Missing(remote map[string]uint64) []crdt.Op {
 	var out []crdt.Op
 	for _, op := range s.ops {
 		if op.Seq > remote[op.Node] {
-			out = append(out, op)
+			out = append(out, copyOp(op))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
