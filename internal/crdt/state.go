@@ -111,6 +111,32 @@ func (s *State) ObservedTags(doc, field, element string) []string {
 	return f.Set.tags(element)
 }
 
+// FieldKind reports the visible CRDT shape of a field ("reg", "set"), or ""
+// when the field does not exist. It is used to reject local operations that
+// would silently change a field's type.
+func (s *State) FieldKind(doc, field string) string {
+	d := s.Docs[doc]
+	if d == nil {
+		return ""
+	}
+	f := d.Fields[field]
+	if f == nil {
+		return ""
+	}
+	switch {
+	case f.Reg == nil && f.Set == nil:
+		return ""
+	case f.Set == nil:
+		return "reg"
+	case f.Reg == nil:
+		return "set"
+	case f.Reg.HLC.Compare(f.Set.HLC) >= 0:
+		return "reg"
+	default:
+		return "set"
+	}
+}
+
 // Doc returns the materialized fields of one document. The second return value
 // reports whether the document exists.
 func (s *State) Doc(id string) (map[string]FieldView, bool) {

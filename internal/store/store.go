@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/rushikeshg25/driftdb/internal/crdt"
 	"github.com/rushikeshg25/driftdb/internal/hlc"
@@ -38,6 +39,14 @@ var (
 	// ErrNodeMismatch is returned when a data directory already belongs to a
 	// different replica id.
 	ErrNodeMismatch = errors.New("store: data directory belongs to another node")
+	// ErrInvalidNode is returned for replica ids that cannot be used in
+	// operation ids.
+	ErrInvalidNode = errors.New("store: node id must be 1-128 characters without '/' or whitespace")
+	// ErrTypeConflict is returned when a local write would switch an existing
+	// field between a register and a set. Remote operations still merge
+	// deterministically; this guard only protects local callers from silently
+	// hiding data.
+	ErrTypeConflict = errors.New("store: field already holds a different CRDT type")
 )
 
 // Store is a single replica's database: an op log plus its materialized state.
@@ -56,6 +65,9 @@ type Store struct {
 func Open(dir, node string) (*Store, error) {
 	if node == "" {
 		return nil, ErrNoNode
+	}
+	if !validNode(node) {
+		return nil, ErrInvalidNode
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("store: create directory: %w", err)
@@ -83,6 +95,19 @@ func Open(dir, node string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// validNode keeps operation ids unambiguous and log lines readable.
+func validNode(node string) bool {
+	if node == "" || node != strings.TrimSpace(node) || len(node) > 128 {
+		return false
+	}
+	for _, r := range node {
+		if r == '/' || r == '\\' || unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // pinIdentity records the replica id in the data directory and refuses to
@@ -183,19 +208,23 @@ func (s *Store) applyLocked(op crdt.Op) (bool, error) {
 	if err := op.Validate(); err != nil {
 		return false, err
 	}
-	if err := s.state.Apply(op); err != nil {
-		return false, err
-	}
 	line, err := json.Marshal(op)
 	if err != nil {
 		return false, fmt.Errorf("encode op: %w", err)
 	}
 	line = append(line, '\n')
+	// Write before folding so a failed append or fsync never leaves the
+	// in-memory state ahead of the durable log. The op was validated above, so
+	// this Apply cannot fail; if it somehow does, the log remains authoritative
+	// and replay will surface the same error.
 	if _, err := s.f.Write(line); err != nil {
 		return false, fmt.Errorf("append op: %w", err)
 	}
 	if err := s.f.Sync(); err != nil {
 		return false, fmt.Errorf("sync op: %w", err)
+	}
+	if err := s.state.Apply(op); err != nil {
+		return false, fmt.Errorf("apply persisted op: %w", err)
 	}
 	s.ops[op.ID()] = op
 	s.advanceContiguous(op.Node)
@@ -212,6 +241,9 @@ func (s *Store) localLocked(kind crdt.OpKind, doc, field, value, element string,
 	}
 	if doc == "" || field == "" {
 		return crdt.Op{}, ErrEmptyKey
+	}
+	if err := s.checkType(kind, doc, field); err != nil {
+		return crdt.Op{}, err
 	}
 	seq := s.seqs[s.node] + 1
 	for s.hasOp(s.node, seq) {
@@ -248,6 +280,22 @@ func (s *Store) advanceContiguous(node string) {
 	for s.hasOp(node, s.seqs[node]+1) {
 		s.seqs[node]++
 	}
+}
+
+// checkType rejects a local op that would flip an existing field between a
+// register and a set.
+func (s *Store) checkType(kind crdt.OpKind, doc, field string) error {
+	switch s.state.FieldKind(doc, field) {
+	case "reg":
+		if kind == crdt.OpSetAdd || kind == crdt.OpSetRemove {
+			return fmt.Errorf("%w: %s.%s is a register; use put/del", ErrTypeConflict, doc, field)
+		}
+	case "set":
+		if kind == crdt.OpSet || kind == crdt.OpDelete {
+			return fmt.Errorf("%w: %s.%s is a set; use sadd/srem", ErrTypeConflict, doc, field)
+		}
+	}
+	return nil
 }
 
 // Set writes a value into a register field.

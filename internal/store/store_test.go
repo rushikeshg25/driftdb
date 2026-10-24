@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/rushikeshg25/driftdb/internal/crdt"
@@ -49,6 +50,80 @@ func TestNodeIdentityIsPinnedToDirectory(t *testing.T) {
 func TestOpenRequiresNode(t *testing.T) {
 	if _, err := Open(t.TempDir(), ""); !errors.Is(err, ErrNoNode) {
 		t.Fatalf("err = %v, want ErrNoNode", err)
+	}
+}
+
+func TestOpenRejectsUnsafeNodeIDs(t *testing.T) {
+	for _, node := range []string{"a/b", "a b", " a", "a\tb", strings.Repeat("x", 129)} {
+		if _, err := Open(t.TempDir(), node); !errors.Is(err, ErrInvalidNode) {
+			t.Fatalf("node %q: err = %v, want ErrInvalidNode", node, err)
+		}
+	}
+	for _, node := range []string{"node-1", "a:b", "replica_2"} {
+		st, err := Open(t.TempDir(), node)
+		if err != nil {
+			t.Fatalf("valid node %q rejected: %v", node, err)
+		}
+		st.Close()
+	}
+}
+
+func TestLocalWritesCannotSwitchFieldType(t *testing.T) {
+	s := openStore(t, t.TempDir(), "a")
+	mustSet(t, s, "doc", "title", "hello")
+
+	if _, err := s.SetAdd("doc", "title", "x"); !errors.Is(err, ErrTypeConflict) {
+		t.Fatalf("sadd on register: err = %v, want ErrTypeConflict", err)
+	}
+	if _, err := s.SetRemove("doc", "title", "x"); !errors.Is(err, ErrTypeConflict) {
+		t.Fatalf("srem on register: err = %v, want ErrTypeConflict", err)
+	}
+	if _, err := s.Set("doc", "title", "still-a-register"); err != nil {
+		t.Fatalf("put on register: %v", err)
+	}
+
+	if _, err := s.SetAdd("doc", "tags", "x"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Set("doc", "tags", "scalar"); !errors.Is(err, ErrTypeConflict) {
+		t.Fatalf("put on set: err = %v, want ErrTypeConflict", err)
+	}
+	if _, err := s.Delete("doc", "tags"); !errors.Is(err, ErrTypeConflict) {
+		t.Fatalf("del on set: err = %v, want ErrTypeConflict", err)
+	}
+	if _, err := s.SetAdd("doc", "tags", "y"); err != nil {
+		t.Fatalf("sadd on set: %v", err)
+	}
+}
+
+func TestFailedAppendDoesNotAdvanceState(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Set("d", "f", "before"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an I/O failure after the store is open by closing the log file
+	// underneath it. The in-memory state must not move ahead of the log.
+	if err := s.f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Set("d", "f", "after"); err == nil {
+		t.Fatal("expected write error")
+	}
+	fields, _ := s.Doc("d")
+	if got := fields["f"].Value; got != "before" {
+		t.Fatalf("value = %q, want before", got)
+	}
+	s.f = nil
+
+	reopened := openStore(t, dir, "a")
+	fields, _ = reopened.Doc("d")
+	if got := fields["f"].Value; got != "before" {
+		t.Fatalf("value after reopen = %q, want before", got)
 	}
 }
 
