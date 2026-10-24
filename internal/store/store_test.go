@@ -29,6 +29,23 @@ func mustSet(t *testing.T, s *Store, doc, field, value string) {
 	}
 }
 
+func TestNodeIdentityIsPinnedToDirectory(t *testing.T) {
+	dir := t.TempDir()
+	first := openStore(t, dir, "a")
+	if _, err := first.Set("d", "f", "v"); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	if _, err := Open(dir, "b"); !errors.Is(err, ErrNodeMismatch) {
+		t.Fatalf("err = %v, want ErrNodeMismatch", err)
+	}
+	again := openStore(t, dir, "a")
+	if got := again.Stats().Ops; got != 1 {
+		t.Fatalf("ops = %d, want 1", got)
+	}
+}
+
 func TestOpenRequiresNode(t *testing.T) {
 	if _, err := Open(t.TempDir(), ""); !errors.Is(err, ErrNoNode) {
 		t.Fatalf("err = %v, want ErrNoNode", err)

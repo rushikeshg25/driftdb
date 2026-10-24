@@ -15,13 +15,17 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/rushikeshg25/driftdb/internal/crdt"
 	"github.com/rushikeshg25/driftdb/internal/hlc"
 )
 
-const logName = "ops.jsonl"
+const (
+	logName      = "ops.jsonl"
+	identityName = "node"
+)
 
 var (
 	// ErrNoNode is returned when a store is opened without a replica id.
@@ -30,6 +34,9 @@ var (
 	ErrClosed = errors.New("store: closed")
 	// ErrEmptyKey is returned for operations missing a document or field.
 	ErrEmptyKey = errors.New("store: document and field are required")
+	// ErrNodeMismatch is returned when a data directory already belongs to a
+	// different replica id.
+	ErrNodeMismatch = errors.New("store: data directory belongs to another node")
 )
 
 // Store is a single replica's database: an op log plus its materialized state.
@@ -52,6 +59,9 @@ func Open(dir, node string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("store: create directory: %w", err)
 	}
+	if err := pinIdentity(dir, node); err != nil {
+		return nil, err
+	}
 	path := filepath.Join(dir, logName)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
 	if err != nil {
@@ -72,6 +82,28 @@ func Open(dir, node string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// pinIdentity records the replica id in the data directory and refuses to
+// silently reuse operations from another identity.
+func pinIdentity(dir, node string) error {
+	path := filepath.Join(dir, identityName)
+	raw, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		existing := strings.TrimSpace(string(raw))
+		if existing != node {
+			return fmt.Errorf("%w: %q (requested %q)", ErrNodeMismatch, existing, node)
+		}
+		return nil
+	case errors.Is(err, os.ErrNotExist):
+		if err := os.WriteFile(path, []byte(node+"\n"), 0o644); err != nil {
+			return fmt.Errorf("store: write node identity: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("store: read node identity: %w", err)
+	}
 }
 
 // replay rebuilds state from disk. A trailing line without a newline is
