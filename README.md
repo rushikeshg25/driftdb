@@ -182,4 +182,6 @@ make vet
 make demo
 ```
 
+See [plan.md](plan.md) for milestones, design decisions, and the roadmap.
+
 MIT licensed.
