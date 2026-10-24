@@ -190,3 +190,91 @@ func TestCLIUsageDoesNotCreateStore(t *testing.T) {
 		}
 	}
 }
+
+func TestExportCannotOverwriteStoreFiles(t *testing.T) {
+	for _, name := range []string{"node", "ops.jsonl"} {
+		for _, alias := range []string{"direct", "symlink", "hardlink"} {
+			t.Run(name+"/"+alias, func(t *testing.T) {
+				dir := t.TempDir()
+				if _, _, err := runCLI(t, "--data", dir, "--node", "a", "put", "d", "f", "v"); err != nil {
+					t.Fatal(err)
+				}
+				original := filepath.Join(dir, name)
+				before, err := os.ReadFile(original)
+				if err != nil {
+					t.Fatal(err)
+				}
+				target := original
+				if alias != "direct" {
+					target = filepath.Join(t.TempDir(), "alias")
+					link := os.Link
+					if alias == "symlink" {
+						link = os.Symlink
+					}
+					if err := link(original, target); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, _, err := runCLI(t, "--data", dir, "--node", "a", "export", target); err == nil {
+					t.Error("export accepted a live store file")
+				}
+				after, err := os.ReadFile(original)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(before, after) {
+					t.Error("export corrupted store file")
+				}
+			})
+		}
+	}
+}
+
+func TestExportReplacesBackupAndCleansTemporaryFiles(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := runCLI(t, "--data", dir, "--node", "a", "put", "d", "f", "new"); err != nil {
+		t.Fatal(err)
+	}
+	backupDir := t.TempDir()
+	target := filepath.Join(backupDir, "backup.jsonl")
+	if err := os.WriteFile(target, []byte("old backup"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runCLI(t, "--data", dir, "--node", "a", "export", target); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"value":"new"`)) || bytes.Contains(raw, []byte("old backup")) {
+		t.Fatalf("backup=%s", raw)
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatal("changed backup permissions")
+	}
+	// A nonempty directory cannot be replaced. The error must leave both the
+	// destination and its contents intact, without an orphaned temporary file.
+	blocked := filepath.Join(backupDir, "blocked")
+	if err := os.Mkdir(blocked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(blocked, "keep")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runCLI(t, "--data", dir, "--node", "a", "export", blocked); err == nil {
+		t.Fatal("expected export failure")
+	}
+	if got, err := os.ReadFile(sentinel); err != nil || string(got) != "keep" {
+		t.Fatalf("destination changed: %q %v", got, err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(backupDir, ".driftdb-export-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("temporary files=%v err=%v", leftovers, err)
+	}
+}

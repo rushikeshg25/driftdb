@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -304,17 +305,55 @@ func exportOps(st *store.Store, args []string, out io.Writer) error {
 	if len(args) > 1 {
 		return fmt.Errorf("export takes at most one path")
 	}
-	w := out
-	if len(args) == 1 {
-		f, err := os.Create(args[0])
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		w = f
+	ops := st.Ops()
+	if len(args) == 0 {
+		return writeOps(out, ops)
 	}
-	enc := json.NewEncoder(w)
-	for _, op := range st.Ops() {
+	target := args[0]
+	mode := os.FileMode(0o644)
+	info, err := os.Stat(target)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil {
+		for _, name := range []string{"node", "ops.jsonl"} {
+			protected, err := os.Stat(filepath.Join(st.Dir(), name))
+			if err != nil {
+				return err
+			}
+			if os.SameFile(info, protected) {
+				return fmt.Errorf("export cannot overwrite store file %s", name)
+			}
+		}
+		mode = info.Mode().Perm()
+	}
+	// Do not truncate an existing backup until the complete export is ready.
+	// Create the temporary file beside the destination so rename stays on one
+	// filesystem. Rename replaces an ordinary destination without following it.
+	f, err := os.CreateTemp(filepath.Dir(target), ".driftdb-export-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	if err := writeOps(f, ops); err != nil {
+		return err
+	}
+	if err := f.Chmod(mode); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), target)
+}
+
+func writeOps(out io.Writer, ops []crdt.Op) error {
+	enc := json.NewEncoder(out)
+	for _, op := range ops {
 		if err := enc.Encode(op); err != nil {
 			return err
 		}

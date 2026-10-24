@@ -151,6 +151,10 @@ a register, fails with a type-conflict error instead of silently hiding data.
 Operations received from peers still merge deterministically by HLC even if they
 mix types.
 
+`export path` writes a complete temporary file before replacing the destination.
+It refuses to overwrite the current store's `node` or `ops.jsonl` files, including
+symlink and hard-link aliases. Export without a path still writes NDJSON to stdout.
+
 ## A conflict, step by step
 
 ```sh
